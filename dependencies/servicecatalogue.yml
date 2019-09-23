@@ -1,0 +1,166 @@
+---
+Description: "This CloudFormation template sets up a service catalog portfolio with EKS and CI/CD products"
+Parameters:
+  IAMPrincipalARN:
+    Description: Enter IAM user, group, or role ARN for Service Catalog end user to launch products. (i.e. arn:aws:iam::<account id>:group/<group name>)
+    Type: String
+  Environment:
+    Description: Environment of this account (Dev, Stage, or Prod)
+    Type: String
+    AllowedValues:
+      - Dev
+      - Stage
+      - Prod
+Mappings:
+  TemplateMap:
+    PipelineTemplate:
+      URL: https://poc-gitops-eks.s3.us-east-2.amazonaws.com/blog-github-pipeline.template.yaml
+Resources:
+  DevPortfolio:
+    Type: "AWS::ServiceCatalog::Portfolio"
+    Properties:
+      AcceptLanguage: "en"
+      Description: "Portfolio for application development"
+      DisplayName: "AppDev Services"
+      ProviderName: "IT (it@example.com)"
+  EnvironmentTagOption:
+    Type: "AWS::ServiceCatalog::TagOption"
+    Properties:
+      Key: "environment"
+      Value: !Ref Environment
+  EnvironmentPortfolioTagOptionAssociation:
+    Type: "AWS::ServiceCatalog::TagOptionAssociation"
+    Properties:
+      ResourceId: !Ref DevPortfolio
+      TagOptionId: !Ref EnvironmentTagOption
+  PortfolioPrincipalAssociation:
+    Type: "AWS::ServiceCatalog::PortfolioPrincipalAssociation"
+    Properties:
+      AcceptLanguage: "en"
+      PortfolioId: !Ref DevPortfolio
+      PrincipalARN: !Ref IAMPrincipalARN
+      PrincipalType: "IAM"
+
+  ### CodePipeline Product
+  PipelineProduct:
+    Type: "AWS::ServiceCatalog::CloudFormationProduct"
+    Properties:
+      AcceptLanguage: "en"
+      Description: "Approved Pipeline Definition.  Deploys GitHub and ECR repos and CodePipeline"
+      Distributor: "IT"
+      Name: "Pipeline for Docker Images"
+      Owner: "IT"
+      SupportEmail: "it@example.com"
+      SupportUrl: "https://support.example.com"
+      SupportDescription: "Link to open a case with IT Support"
+      ProvisioningArtifactParameters:
+        -
+          Description: "Version 1 of Pipeline product"
+          Name: "v1.0"
+          Info:
+            LoadTemplateFromURL : !FindInMap [TemplateMap, PipelineTemplate, URL]
+  PipelinePortfolioProductAssociation:
+    Type: "AWS::ServiceCatalog::PortfolioProductAssociation"
+    Properties:
+      AcceptLanguage: "en"
+      PortfolioId: !Ref DevPortfolio
+      ProductId: !Ref PipelineProduct
+  PipelineLaunchConstraint:
+    Type: "AWS::ServiceCatalog::LaunchRoleConstraint"
+    Properties:
+      AcceptLanguage: "en"
+      Description: "This launch constraint ensures that developers can launch CodePipeline, CodeBuild, and ECR without direct permissions"
+      PortfolioId: !Ref DevPortfolio
+      ProductId: !Ref PipelineProduct
+      RoleArn: !GetAtt SCPipelineProductLaunchRole.Arn
+  SCPipelineProductLaunchRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - servicecatalog.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: PipelineLaunchPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: VisualEditor0
+                Effect: Allow
+                Action:
+                  - 's3:GetObjectVersionTagging'
+                  - 'iam:RemoveRoleFromInstanceProfile'
+                  - 's3:CreateBucket'
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStacks
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:SetStackPolicy
+                  - cloudformation:ValidateTemplate
+                  - cloudformation:UpdateStack
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:DescribeStacks
+                  - cloudformation:GetTemplate
+                  - cloudformation:ListStackResources
+                  - s3:GetObject
+                  - ecr:*
+                  - codepipeline:*
+                  - codebuild:*
+                  - cloudwatch:*
+                  - iam:GetPolicy
+                  - iam:GetPolicyVersion
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListRolePolicies
+                  - iam:ListRoles
+                  - iam:PassRole
+                  - iam:CreateRole
+                  - iam:CreateInstanceProfile
+                  - iam:DeleteInstanceProfile
+                  - iam:AddRoleToInstanceProfile
+                  - iam:RemoveRoleFromInstanceProfile
+                  - iam:PutRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:DeleteRole
+                  - iam:CreateServiceLinkedRole
+                  - autoscaling:*
+                  - kms:List*
+                  - kms:Describe*
+                  - kms:Get*
+                  - kms:Put*
+                  - kms:Update*
+                  - kms:Revoke*
+                  - kms:Create*
+                  - kms:Disable*
+                  - kms:Delete*
+                  - kms:TagResource
+                  - kms:ScheduleKeyDeletion
+                  - kms:CancelKeyDeletion
+                  - lambda:*
+                  - logs:*
+                  - s3:*
+                  - sns:ListSubscriptions
+                  - sns:ListSubscriptionsByTopic
+                  - sns:ListTopics
+                  - sns:Publish
+                  - sns:Subscribe
+                  - sns:Unsubscribe
+                  - tag:GetResources
+                Resource: '*'
+
+Outputs:
+  PortfolioID:
+    Value: !Ref DevPortfolio
+  PipelineProductID:
+    Value: !Ref PipelineProduct

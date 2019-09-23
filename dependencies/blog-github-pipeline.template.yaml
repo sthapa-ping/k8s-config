@@ -1,0 +1,472 @@
+---
+########################################################################################
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.              #
+#                                                                                      #
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this #
+# software and associated documentation files (the "Software"), to deal in the Software#
+# without restriction, including without limitation the rights to use, copy, modify,   #
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to   #
+# permit persons to whom the Software is furnished to do so.                           #
+#                                                                                      #
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,  #
+# INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A        #
+# PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT   #
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION    #
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE       #
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                               #
+########################################################################################
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "This CloudFormation template sets up a GitHub repo and CodePipeline to build Docker Images"
+Parameters:
+  ProjectName:
+    Description: Name of the CodePipeline project and GitHub repo to create
+    Type: String
+    Default: eks-example
+  ProjectDescription:
+    Description: Description of the Project
+    Type: String
+  S3Bucket:
+    Description: S3 Bucket to create for artifacts
+    Type: String
+  BranchName:
+    Type: String
+    Description: GitHub Branch to track for pipeline execution
+    Default: master
+  GitHubUser:
+    Type: String
+    Description: Enter your GitHub User Name
+  GitHubToken:
+    Type: String
+    Description: Enter your GitHub Personal Access Token from https://github.com/settings/tokens
+    NoEcho: true
+  LambdaZipBucketName:
+    Type: String
+    Description: Name of existing bucket that contains GitHub lambda function
+    Default: blog-gitops-eks
+  DeleteRepo:
+    Type: String
+    Description: Delete GitHub Repo on Stack Delete
+    Default: false
+    AllowedValues:
+      - true
+      - false
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "Project Details"
+        Parameters:
+          - ProjectName
+          - ProjectDescription
+          - S3Bucket
+      -
+        Label:
+          default: "GitHub Details"
+        Parameters:
+          - GitHubUser
+          - GitHubToken
+          - BranchName
+          - DeleteRepo
+          - LambdaZipBucketName
+    ParameterLabels:
+      ProjectName:
+        default: "Project Name"
+      ProjectDescription:
+        default: "Project Description"
+      S3Bucket:
+        default: "S3 Artifact Bucket"
+      GitHubUser:
+        default: "GitHub User"
+      GitHubToken:
+        default: "GitHub Token"
+      BranchName:
+        default: "GitHub Branch"
+      DeleteRepo:
+        default: "Delete Repository"
+      LambdaZipBucketName:
+        default: "GitHub Lambda Bucket"
+
+Resources:
+  ### Create/Delete GitHub Repo Function
+  GitHubFunction:
+    Type: "AWS::Lambda::Function"
+    DependsOn: LambdaExecutionRole
+    Properties:
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python2.7
+      Timeout: 20
+      Code:
+        S3Bucket: !Ref LambdaZipBucketName
+        S3Key: function.zip
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [lambda.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyName: lambda-execute
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - logs:*
+            Resource: 'arn:aws:logs:*:*:*'
+      - PolicyName: lambda-basic-execution
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: '*'
+
+  GitHubFunctionAction:
+    Type: Custom::GitHubFunction
+    DependsOn:
+      - GitHubFunction
+    Properties:
+      ServiceToken: !GetAtt GitHubFunction.Arn
+      GitHubToken: !Sub ${GitHubToken}
+      RepoName: !Sub ${ProjectName}
+      RepoDescription: !Sub ${ProjectDescription}
+      DeleteRepo: !Sub ${DeleteRepo}
+  ####
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref S3Bucket
+
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Statement:
+          -
+            Action:
+              - s3:*
+            Effect: Allow
+            Resource:
+              - !Sub arn:aws:s3:::${S3Bucket}
+              - !Sub arn:aws:s3:::${S3Bucket}/*
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-CodeBuildServiceRole
+                - !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-CodePipelineServiceRole
+          -
+            Action:
+              - s3:Get*
+              - s3:Put*
+              - s3:ListBucket
+            Effect: Allow
+            Resource:
+              - !Sub arn:aws:s3:::${S3Bucket}
+              - !Sub arn:aws:s3:::${S3Bucket}/*
+            Principal:
+              AWS:
+                - !Sub ${AWS::AccountId}
+
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ProjectName
+      # Note - By default only the repository owner has access to the repository
+      RepositoryPolicyText:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: AllowReadAllAccountUsers
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub ${AWS::AccountId}
+            Action:
+              - "ecr:GetDownloadUrlForLayer"
+              - "ecr:BatchGetImage"
+              - "ecr:BatchCheckLayerAvailability"
+      # RepositoryPolicyText:
+      #   Version: "2012-10-17"
+      #   Statement:
+      #     -
+      #       Sid: AllowPushPull
+      #       Effect: Allow
+      #       Principal:
+      #         AWS:
+      #           - "arn:aws:iam::392294680004:user/root"
+      #           - "arn:aws:iam::392294680004:user/dev1"
+      #       Action:
+      #         - "ecr:GetDownloadUrlForLayer"
+      #         - "ecr:BatchGetImage"
+      #         - "ecr:BatchCheckLayerAvailability"
+      #         - "ecr:PutImage"
+      #         - "ecr:InitiateLayerUpload"
+      #         - "ecr:UploadLayerPart"
+      #         - "ecr:CompleteLayerUpload"
+       ### TODO - Update the policy here for Admin?
+       ### Allow access from CodeBuild/CodePipeline???  I think CodeBuild is the owner...
+
+      #     -
+      #       Sid: AllowPushPullAdmins
+      #       Effect: Allow
+      #       Principal:
+      #         AWS:
+      #           - !Sub "arn:aws:iam::${AWS::AccountId}:user/root"
+      #           ### TODO - Using below as AWS Principal Causes circular dependency with CodeBuildServiceRole
+      #           ###- !GetAtt [CodeBuildServiceRole,Arn]
+      #       Action:
+      #         - "ecr:GetDownloadUrlForLayer"
+      #         - "ecr:BatchGetImage"
+      #         - "ecr:BatchCheckLayerAvailability"
+      #         - "ecr:PutImage"
+      #         - "ecr:InitiateLayerUpload"
+      #         - "ecr:UploadLayerPart"
+      #         - "ecr:CompleteLayerUpload"
+
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    DependsOn: ArtifactBucket
+    Properties:
+      RoleName: !Sub ${ProjectName}-CodePipelineServiceRole
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: "Allow"
+          Principal:
+            Service: codepipeline.amazonaws.com
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource:
+                  - !Sub arn:aws:s3:::${ArtifactBucket}
+                  - !Sub arn:aws:s3:::${ArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                  - s3:ListBucket
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  # - cloudformation:Describe*
+                  # - cloudFormation:List*
+                  # - cloudformation:CreateStack
+                  # - cloudformation:DeleteStack
+                  # - cloudformation:DescribeStacks
+                  # - cloudformation:UpdateStack
+                  # - cloudformation:CreateChangeSet
+                  # - cloudformation:DeleteChangeSet
+                  # - cloudformation:DescribeChangeSet
+                  # - cloudformation:ExecuteChangeSet
+                  # - cloudformation:SetStackPolicy
+                  # - cloudformation:ValidateTemplate
+                  - iam:ListRoles
+                  - iam:PassRole
+                  - codepipeline:*
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketLocation
+              - Resource: !GetAtt Repository.Arn
+                Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - lambda:*
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-CodeBuildServiceRole
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        -  Action: sts:AssumeRole
+           Effect: Allow
+           Principal:
+             Service: codebuild.amazonaws.com
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+              - Resource: arn:aws:logs:*:*:*
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+              - Resource:
+                  - !Sub arn:aws:s3:::${ArtifactBucket}
+                  - !Sub arn:aws:s3:::${ArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                  - s3:ListBucket
+              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${Repository}
+                Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref AWS::StackName
+      Description: !Ref ProjectName
+      ServiceRole: !Ref CodeBuildServiceRole
+      Artifacts:
+        Location: !Ref ArtifactBucket
+        Type: "S3"
+      Source:
+        Location: !Sub ${ArtifactBucket}/source.zip
+        Type: "S3"
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                docker: 18
+              commands:
+                - apt-get -y update
+                - apt-get -y install jq
+            pre_build:
+              commands:
+                - echo "Starting docker daemon..."
+                - nohup /usr/local/bin/dockerd --host=unix:///var/run/docker.sock --host=tcp://127.0.0.1:2375 --storage-driver=overlay2&
+                - timeout 15 sh -c "until docker info; do echo .; sleep 1; done"
+                - echo "Logging into Amazon ECR..."
+                - $(aws ecr get-login --no-include-email --region ${AWS_DEFAULT_REGION})
+                - TAG="$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | head -c 8)"
+            build:
+              commands:
+                - echo Build started on `date`
+                - docker build -t "${REPOSITORY_URI}:latest" .
+                - docker tag "${REPOSITORY_URI}:latest" "${REPOSITORY_URI}:${TAG}"
+            post_build:
+              commands:
+                - echo Build completed on `date`
+                - echo "Pushing Docker image to ECR"
+                - docker push "${REPOSITORY_URI}:latest"
+                - docker push "${REPOSITORY_URI}:${TAG}"
+                - printf '{"Tag":"%s","RepositoryUri":"%s","ProjectName":"%s","ArtifactBucket":"%s"}' $TAG $REPOSITORY_URI $PROJECT_NAME $ARTIFACT_BUCKET > build.json
+          artifacts:
+            files:
+              - build.json
+
+      Environment:
+        ComputeType: "BUILD_GENERAL1_SMALL"
+        Image: "aws/codebuild/standard:2.0"
+        Type: "LINUX_CONTAINER"
+        PrivilegedMode: True
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: REPOSITORY_URI
+            Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repository}
+          - Name: PROJECT_NAME
+            Value: !Ref ProjectName
+          - Name: ARTIFACT_BUCKET
+            Value: !Ref ArtifactBucket
+      TimeoutInMinutes: 10
+      Tags:
+        - Key: Name
+          Value: !Ref ProjectName
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn: GitHubFunctionAction
+    Properties:
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        # Should switch to Webhooks...
+        - Name: Source
+          Actions:
+            - Name: GitHub
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              Configuration:
+                Owner: !Ref GitHubUser
+                Repo: !Ref ProjectName
+                Branch: !Ref BranchName
+                OAuthToken: !Ref GitHubToken
+              OutputArtifacts:
+                - Name: App
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: App
+              OutputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+        ### Weave Flux handles deploy.  CI just builds ###
+
+Outputs:
+  ArtifactBucket:
+    Value: !Ref ArtifactBucket
+    Description: Artifact Bucket used by CodePipeline
+
+  PipelineUrl:
+    Value: !Sub https://console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${Pipeline}
+    Description: AWS Console HTTP URL for CodePipeline
+
+  ECRRepositoryArn:
+    Value: !GetAtt Repository.Arn
+    Description: ARN for the ECR Repository
+
+  CodeBuildProject:
+    Description: 'The build project to create the container image'
+    Value: !Ref CodeBuildProject
